@@ -1,74 +1,15 @@
 import * as THREE from 'three';
 
 export async function createTriplanarMaterial() {
-    const textureLoader = new THREE.TextureLoader();
-    let modelTexture = null;
-    try {
-        modelTexture = await textureLoader.loadAsync('/texture.jpg');
-        modelTexture.colorSpace = THREE.SRGBColorSpace;
-        modelTexture.wrapS = THREE.RepeatWrapping;
-        modelTexture.wrapT = THREE.RepeatWrapping;
-        console.log('纹理贴图加载成功');
-    } catch (e) {
-        console.warn('纹理贴图加载失败，将使用纯色:', e);
-    }
-
-    const textureScale = 0.05;
+    // 创建一个纯白、不接受顶点颜色的标准材质
     const material = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
+        color: 0xffffff,      // 纯白
         side: THREE.DoubleSide,
-        roughness: 0.8,
-        metalness: 0.2,
+        roughness: 0.6,       // 稍微调低粗糙度，让光影更清晰
+        metalness: 0.1,       
+        vertexColors: false,  // 【关键】强制忽略几何体自带的顶点颜色
+        flatShading: false
     });
-
-    if (modelTexture) {
-        material.onBeforeCompile = (shader) => {
-            shader.uniforms.uTexture = { value: modelTexture };
-            shader.uniforms.uScale = { value: textureScale };
-
-            shader.vertexShader = `
-                varying vec3 vWorldPosition;
-                ${shader.vertexShader}
-            `;
-
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <project_vertex>',
-                `
-                vWorldPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;
-                #include <project_vertex>
-                `
-            );
-
-            shader.fragmentShader = `
-                uniform sampler2D uTexture;
-                uniform float uScale;
-                varying vec3 vWorldPosition;
-                ${shader.fragmentShader}
-            `;
-
-            shader.fragmentShader = shader.fragmentShader.replace(
-                '#include <map_fragment>',
-                `
-                vec3 dx = dFdx(vWorldPosition);
-                vec3 dy = dFdy(vWorldPosition);
-                vec3 worldNormal = normalize(cross(dx, dy));
-                
-                vec3 blending = abs(worldNormal);
-                blending = normalize(max(blending, 0.00001));
-                float b = (blending.x + blending.y + blending.z);
-                blending /= vec3(b, b, b);
-
-                vec3 xaxis = texture2D(uTexture, vWorldPosition.yz * uScale).rgb;
-                vec3 yaxis = texture2D(uTexture, vWorldPosition.xz * uScale).rgb;
-                vec3 zaxis = texture2D(uTexture, vWorldPosition.xy * uScale).rgb;
-
-                vec4 texColor = vec4(xaxis * blending.x + yaxis * blending.y + zaxis * blending.z, 1.0);
-                
-                diffuseColor *= texColor;
-                `
-            );
-        };
-    }
     return material;
 }
 
@@ -78,16 +19,16 @@ export async function applyMaterialToModel(model, material, progressUI, startTim
         return 0;
     }
 
-    // 兼容处理：检查 .object，如果不存在则假设 model 本身就是 Object3D
     const root = model.object ? model.object : model;
     
     if (!root.traverse) {
-        console.warn('applyMaterialToModel: Model root object has no traverse method', root);
         return 0;
     }
 
     let meshCount = 0;
     const meshes = [];
+    
+    // 1. 先收集所有 Mesh
     root.traverse((child) => {
         if (child.isMesh) {
             meshes.push(child);
@@ -95,28 +36,57 @@ export async function applyMaterialToModel(model, material, progressUI, startTim
         }
     });
 
-    if(progressUI) progressUI.update(`发现 ${meshCount} 个构件，正在应用纹理...`, 60, startTime);
+    if(progressUI) progressUI.update(`发现 ${meshCount} 个构件，正在重置颜色...`, 60, startTime);
 
-    // 避免没有mesh的情况
-    if (meshes.length === 0) {
-        return 0;
-    }
+    if (meshes.length === 0) return 0;
 
-    // 增加批处理大小以减少 setTimeout 的调用频率，提高加载速度
-    const batchSize = 500;
+    const batchSize = 1000; // 稍微加大批处理量
     for (let i = 0; i < meshes.length; i += batchSize) {
         const batch = meshes.slice(i, i + batchSize);
+        
         for (const child of batch) {
+            // 开启阴影
             child.castShadow = true;
             child.receiveShadow = true;
+
+            // --- 【关键修改：资源清理】 ---
+            // 替换前，先销毁旧材质，释放内存 (避免显存溢出)
+            if (child.material) {
+                if (Array.isArray(child.material)) {
+                    child.material.forEach(m => m.dispose());
+                } else {
+                    child.material.dispose();
+                }
+            }
+
+            // --- 【关键修改：强制覆盖】 ---
+            // 1. 替换为统一的白色材质
             child.material = material;
+
+            // 2. 移除几何体顶点颜色 (Attribute)
+            // 很多 BIM 模型会在几何体里硬编码颜色，必须删掉
+            if (child.geometry.attributes.color) {
+                child.geometry.deleteAttribute('color');
+                child.geometry.attributes.color = null; // 确保引用断开
+                child.geometry.needsUpdate = true;
+            }
+
+            // 3. 重置 InstancedMesh 的实例颜色
+            // 如果是大量重复构件（如柱子、梁），颜色通常存储在这里
+            if (child.isInstancedMesh && child.instanceColor) {
+                // 将颜色缓冲区全部填为 1.0 (RGB均为1即白色)
+                // 这样既保留了缓冲区结构(供后续交互高亮使用)，又重置了视觉颜色
+                child.instanceColor.array.fill(1.0);
+                child.instanceColor.needsUpdate = true;
+            }
         }
 
         if(progressUI) {
             const progress = 60 + Math.floor((i / meshes.length) * 30);
-            // 传入 startTime 以便 UI 正确显示耗时
-            progressUI.update(`应用纹理中... (${i + batch.length}/${meshCount})`, progress, startTime);
+            progressUI.update(`全白处理中... (${i + batch.length}/${meshCount})`, progress, startTime);
         }
+        
+        // 让出主线程，防止 UI 卡死
         await new Promise(resolve => setTimeout(resolve, 0));
     }
     return meshCount;

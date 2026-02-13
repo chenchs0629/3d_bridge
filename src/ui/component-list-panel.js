@@ -8,7 +8,7 @@ export function setupComponentListPanel(onItemClickCallback) {
     componentListPanel.style.cssText = `
       position: absolute;
       top: 0;
-      left: 0;
+      right: 0;
       width: 320px;
       height: 100%;
       background: rgba(30, 30, 40, 0.95);
@@ -18,7 +18,7 @@ export function setupComponentListPanel(onItemClickCallback) {
       display: none;
       flex-direction: column;
       z-index: 1500;
-      box-shadow: 3px 0 15px rgba(0,0,0,0.5);
+      box-shadow: -3px 0 15px rgba(0,0,0,0.5);
       transition: transform 0.3s ease;
     `;
 
@@ -64,6 +64,13 @@ export function toggleComponentListPanel() {
 export async function buildComponentList(model, onItemClickCallback) {
     _onItemClickCallback = onItemClickCallback; // 更新回调
     componentList = [];
+    
+    // 如果没有模型，直接清空列表并返回
+    if (!model) {
+        renderComponentList(componentList, _onItemClickCallback);
+        return;
+    }
+
     try {
         const localIds = await model.getItemsIdsWithGeometry();
         if (localIds.length === 0) {
